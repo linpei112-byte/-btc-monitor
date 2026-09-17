@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<title>BTC 自动盯盘</title>
+<style>
+body{margin:0;background:#0b1020;color:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",Arial,sans-serif}
+.wrap{max-width:720px;margin:auto;padding:18px}
+h1{font-size:25px;margin:5px 0 4px}.sub{color:#9ca3af;font-size:13px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.card{background:#151c2e;border:1px solid #263149;border-radius:16px;padding:14px}
+.label{color:#9ca3af;font-size:12px}.value{font-size:22px;font-weight:700;margin-top:6px}
+.big{font-size:34px}.signal{padding:18px;border-radius:18px;margin:12px 0;background:#151c2e;border:1px solid #263149}
+.signal h2{margin:0 0 8px;font-size:25px}.reason{color:#cbd5e1;line-height:1.55;font-size:14px}
+.up{color:#34d399}.down{color:#fb7185}.flat{color:#fbbf24}
+.row{display:flex;justify-content:space-between;gap:12px;margin:9px 0;font-size:14px}
+button{width:100%;border:0;border-radius:13px;padding:13px;background:#2563eb;color:white;font-size:16px;font-weight:700;margin-top:12px}
+.small{font-size:12px;color:#94a3b8;line-height:1.5;margin-top:12px}
+.status{font-size:12px;color:#93c5fd}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>₿ BTC 自动盯盘</h1>
+<div class="sub">OKX BTC-USDT-SWAP · 浏览器实时监控</div>
+
+<div class="card">
+  <div class="label">BTC 价格</div>
+  <div id="price" class="value big">连接中…</div>
+  <div id="status" class="status">正在连接 OKX</div>
+</div>
+
+<div class="signal">
+  <h2 id="signal">等待数据</h2>
+  <div id="reason" class="reason">收集价格、OI、资金费率和主动买卖数据后给出方向判断。</div>
+</div>
+
+<div class="grid">
+  <div class="card"><div class="label">OI</div><div id="oi" class="value">—</div></div>
+  <div class="card"><div class="label">资金费率</div><div id="funding" class="value">—</div></div>
+  <div class="card"><div class="label">1分钟价格变化</div><div id="pchg" class="value">—</div></div>
+  <div class="card"><div class="label">1分钟 OI变化</div><div id="oichg" class="value">—</div></div>
+</div>
+
+<div class="card" style="margin-top:10px">
+  <div class="row"><span>盘口买卖压力</span><b id="pressure">—</b></div>
+  <div class="row"><span>异常砸盘检测</span><b id="dump">—</b></div>
+  <div class="row"><span>综合信号强度</span><b id="score">—</b></div>
+</div>
+
+<button onclick="location.reload()">重新连接</button>
+<div class="small">
+说明：这是第一版浏览器监控器。方向结论由公开市场数据和规则引擎生成，不代表确定的未来走势，也不是投资建议。<br>
+建议先观察它在快速波动时的表现；后续可以再加入真正的 AI 分析、Telegram/通知提醒和多交易所数据。
+</div>
+</div>
+
+<script>
+const WS="wss://ws.okx.com:8443/ws/v5/public";
+let ws, prices=[], oiHist=[], lastTick=0, lastOi=0, funding=0, bids=0, asks=0;
+
+function fmt(n,d=2){return Number(n).toLocaleString('en-US',{maximumFractionDigits:d})}
+function pct(n){return (n*100).toFixed(3)+"%"}
+function set(id,v,cls=""){let e=document.getElementById(id);e.textContent=v;e.className=e.className.replace(/\b(up|down|flat)\b/g,"")+" "+cls}
+
+function connect(){
+ ws=new WebSocket(WS);
+ ws.onopen=()=>{
+   document.getElementById("status").textContent="OKX 已连接 · 正在实时收集数据";
+   ws.send(JSON.stringify({op:"subscribe",args:[
+     {channel:"tickers",instId:"BTC-USDT-SWAP"},
+     {channel:"open-interest",instId:"BTC-USDT-SWAP"},
+     {channel:"books5",instId:"BTC-USDT-SWAP"},
+     {channel:"funding-rate",instId:"BTC-USDT-SWAP"}
+   ]}));
+ };
+ ws.onmessage=e=>{
+   const m=JSON.parse(e.data);
+   if(!m.data||!m.arg)return;
+   const c=m.arg.channel, d=m.data[0];
+   if(c==="tickers"){
+     const p=Number(d.last); prices.push({t:Date.now(),p}); prices=prices.filter(x=>Date.now()-x.t<60000);
+     set("price","$"+fmt(p,2));
+   }
+   if(c==="open-interest"){
+     const v=Number(d.oi); if(v){lastOi=lastOi||v; oiHist.push({t:Date.now(),v}); oiHist=oiHist.filter(x=>Date.now()-x.t<60000); set("oi",fmt(v,0));}
+   }
+   if(c==="funding-rate"){funding=Number(d.fundingRate); set("funding",pct(funding),funding>0?"up":funding<0?"down":"flat");}
+   if(c==="books5"){
+     bids=d.bids.reduce((s,x)=>s+Number(x[1]),0); asks=d.asks.reduce((s,x)=>s+Number(x[1]),0);
+     const r=(bids-asks)/(bids+asks||1); set("pressure",(r>=0?"+":"")+pct(r),r>0.08?"up":r<-0.08?"down":"flat");
+   }
+   analyze();
+ };
+ ws.onclose=()=>{document.getElementById("status").textContent="连接断开，5秒后重连";setTimeout(connect,5000)}
+ ws.onerror=()=>{document.getElementById("status").textContent="连接异常，正在重试"}
+}
+function analyze(){
+ if(prices.length<2||oiHist.length<2)return;
+ const now=Date.now(), p0=prices[0].p, p=prices.at(-1).p;
+ const op=oiHist[0].v, oi=oiHist.at(-1).v;
+ const pc=(p-p0)/p0, oc=(oi-op)/op;
+ set("pchg",(pc>=0?"+":"")+pct(pc),pc>0?"up":pc<0?"down":"flat");
+ set("oichg",(oc>=0?"+":"")+pct(oc),oc>0?"up":oc<0?"down":"flat");
+
+ let score=0, why=[];
+ if(pc>0.001){score+=2;why.push("价格明显上涨")} else if(pc<-0.001){score-=2;why.push("价格明显下跌")}
+ if(oc>0.002){score += pc>0?2:-2; why.push("OI明显增加")}
+ else if(oc<-0.002){score += pc>0?1:-1; why.push("OI下降")}
+
+ const pr=(bids-asks)/(bids+asks||1);
+ if(pr>0.12){score+=1;why.push("盘口买压偏强")} else if(pr<-0.12){score-=1;why.push("盘口卖压偏强")}
+
+ const dump=pc<-0.003 && oc>0.002;
+ set("dump",dump?"⚠️ 疑似砸盘/空头增仓":"未发现明显异常",dump?"down":"flat");
+
+ let s=score>=3?"偏多":score<=-3?"偏空":"震荡/等待";
+ let cls=score>=3?"up":score<=-3?"down":"flat";
+ set("signal",s,cls);
+ set("score",score>0?("+"+score):score);
+ document.getElementById("reason").textContent=why.length?why.join(" · "):"信号不足，继续观察。";
+}
+connect();
+</script>
+</body>
+</html>
