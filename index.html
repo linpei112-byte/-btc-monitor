@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>BTC 3.2 自动化交易 · REAL DATA DEMO</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+<header><div><h1>₿ BTC 3.2 自动化交易</h1><div class="sub">REAL DATA · 自动模拟交易 · 不接真实资金</div></div><div id="status" class="pill">连接中…</div></header>
+
+<section class="grid top">
+  <div class="card big"><span>BTC-USDT-SWAP</span><strong id="price">--</strong><small id="change">--</small></div>
+  <div class="card"><span>OI</span><b id="oi">--</b><small id="oiChg">--</small></div>
+  <div class="card"><span>资金费率</span><b id="funding">--</b></div>
+  <div class="card"><span>24h成交额</span><b id="vol">--</b></div>
+</section>
+
+<section class="card">
+<h2>多周期信号</h2><div class="periods">
+  <div><span>1m</span><b id="s1">--</b></div><div><span>5m</span><b id="s5">--</b></div>
+  <div><span>15m</span><b id="s15">--</b></div><div><span>30m</span><b id="s30">--</b></div><div><span>1H</span><b id="s60">--</b></div>
+</div>
+<div class="signal"><span>综合方向</span><strong id="direction">等待数据</strong><p id="reason">正在读取实时行情、OI、资金费率和K线。</p></div>
+</section>
+
+<section class="grid">
+<div class="card"><h2>核心指标</h2><div class="metrics">
+<div>EMA20 <b id="ema20">--</b></div><div>EMA60 <b id="ema60">--</b></div>
+<div>RSI14 <b id="rsi">--</b></div><div>MACD柱 <b id="macd">--</b></div>
+<div>布林下/中/上轨 <b id="bb">--</b></div><div>主动买卖 <b id="flow">--</b></div><div>OI 10秒变化 <b id="oiSpeed">--</b></div><div>OI 5分钟变化 <b id="oi5m">--</b></div>
+</div></div>
+<div class="card"><h2>自动化控制</h2>
+<div class="row"><span>自动模拟交易</span><button id="auto" class="on">开启</button></div>
+<div class="row"><span>可用本金</span><b id="cash">$10,000</b></div>
+<div class="row"><span>策略资金池</span><b id="pool">$3,000</b></div>
+<div class="row"><span>账户权益（含浮盈亏）</span><b id="balance">$10,000</b></div>
+<div class="row"><span>当前持仓</span><b id="pos">无</b></div>
+<div class="row"><span>未实现盈亏</span><b id="upnl">--</b></div>
+</div></div>
+
+<section class="card"><h2>模拟交易记录</h2>
+<div class="tablewrap"><table><thead><tr><th>时间</th><th>方向</th><th>开仓价</th><th>杠杆</th><th>模式</th><th>保证金</th><th>数量</th><th>平仓价</th><th>收益</th><th>余额</th><th>原因</th></tr></thead><tbody id="trades"></tbody></table></div></section>
+
+<section class="card small"><h2>风控</h2><p>仅模拟、不接真实资金。启动时先加载OKX历史K线，再用WebSocket实时更新；综合价格、1m/5m/15m/30m/1H、OI变化速度、资金费率、主动成交与波动指标。杠杆随信号强度动态调整（5x/6x/8x），默认逐仓；不使用固定百分比止盈/止损，按趋势反转、动能衰减、波动异常和盈利回撤等条件退出。订单记录保存在本机浏览器。</p></section>
+</div>
+<script src="app.js?v=10"></script><script>if("serviceWorker" in navigator){navigator.serviceWorker.register("sw.js").catch(()=>{})}</script>
+</body></html>
