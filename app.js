@@ -2,7 +2,7 @@ const WS="wss://ws.okx.com:8443/ws/v5/public";
 const REST="https://www.okx.com";
 const INST="BTC-USDT-SWAP";
 const TF={"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1H":"1H"};
-const STORAGE={trades:"btc32_v19_trades",cash:"btc32_v19_cash",reserved:"btc32_v19_reserved",pos:"btc32_v19_pos",initialized:"btc32_v19_initialized",snapshot:"btc32_v19_snapshot"};
+const STORAGE={trades:"btc32_v19_trades",cash:"btc32_v19_cash",reserved:"btc32_v19_reserved",pos:"btc32_v19_pos",initialized:"btc32_v19_initialized",snapshot:"btc32_v19_snapshot",runSeq:"btc32_v19_run_seq"};
 const DB_NAME="btc32_persistence_v19";const DB_STORE="snapshots";const DB_KEY="account";const CACHE_NAME="btc-v3-persistent-account-v19";const CACHE_KEY="./.btc-v3-account-backup-v19.json";const OLD_CACHE_NAMES=[];
 const OLD_DB_NAMES=[];
 function openDB(){return new Promise((resolve,reject)=>{if(!window.indexedDB)return reject(new Error("IndexedDB unavailable"));const r=indexedDB.open(DB_NAME,1);r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains(DB_STORE))r.result.createObjectStore(DB_STORE)};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error||new Error("IndexedDB open failed"))})}
@@ -12,7 +12,10 @@ async function idbGetFrom(name){try{const db=await new Promise((resolve,reject)=
 async function cachePut(snapshot){try{if(!window.caches)return;const c=await caches.open(CACHE_NAME);await c.put(CACHE_KEY,new Response(JSON.stringify(snapshot),{headers:{"Content-Type":"application/json"}}))}catch(e){}}
 async function cacheGet(){try{if(!window.caches)return null;for(const name of [CACHE_NAME,...OLD_CACHE_NAMES]){const c=await caches.open(name);const key=name===CACHE_NAME?CACHE_KEY:"./.btc-v3-account-backup-v14.json";const r=await c.match(key);if(r){const x=await r.json();if(x)return x}}return null}catch(e){return null}}
 async function requestPersistentStorage(){try{if(navigator.storage?.persist){await navigator.storage.persist()}}catch(e){}}
-const state={price:0,markPx:0,bidPx:0,askPx:0,open24h:0,oi:0,funding:0,nextFundingTime:0,vol:0,flowHistory:[],oiHistory:[],priceHistory:[],candles:{},auto:true,pos:null,trades:[],cash:1000,startingCash:1000,reservedMargin:0,pool:1000,ctVal:0.01,ctMult:1,lotSz:1,tickSz:0.1,contractValueCcy:"BTC",takerFee:0.0005,lastSignal:"观望",lastScore:0,lastReason:"",lastTrade:0,ws:null,ready:false,lastFundingApplied:0,fundingAppliedIds:new Set(),book:{bids:[],asks:[]},fresh:{ticker:0,mark:0,oi:0,funding:0,book:0,trades:0,candles:{}},haltReason:"",closing:false};
+const RUN_STARTED_AT=Date.now();
+const RUN_TOKEN=Math.random().toString(36).slice(2,8);
+let RUN_SEQ=1;
+const state={price:0,markPx:0,bidPx:0,askPx:0,open24h:0,oi:0,funding:0,nextFundingTime:0,vol:0,flowHistory:[],oiHistory:[],priceHistory:[],candles:{},auto:true,pos:null,trades:[],cash:1000,startingCash:1000,reservedMargin:0,pool:1000,ctVal:0.01,ctMult:1,lotSz:1,tickSz:0.1,contractValueCcy:"BTC",takerFee:0.0005,lastSignal:"观望",lastScore:0,lastReason:"",lastTrade:0,ws:null,ready:false,lastFundingApplied:0,fundingAppliedIds:new Set(),book:{bids:[],asks:[]},fresh:{ticker:0,mark:0,oi:0,funding:0,book:0,trades:0,candles:{}},haltReason:"",closing:false,reentryGuard:true,reentryUnlockAt:0,bootSignal:"观望",bootScore:0,bootBaselineReady:false,liveSeen:{ticker:false,mark:false,oi:false,funding:false,book:false,trades:false,candles:{}},runId:"",runStartedAt:RUN_STARTED_AT};
 const SIM_MMR=0.005; // 模拟维持保证金率；OKX实际强平价还会受风险档位/账户规则影响
 const $=id=>document.getElementById(id);
 function fmt(n,d=2){return Number.isFinite(n)?Number(n).toLocaleString("en-US",{maximumFractionDigits:d}):"--"}
@@ -85,12 +88,28 @@ function availableCash(){return state.cash}
 function snapshot(){return {version:19,savedAt:Date.now(),trades:state.trades.slice(),cash:state.cash,reservedMargin:state.reservedMargin,pos:state.pos,lastTrade:Number(state.lastTrade)||0,lastFundingApplied:Number(state.lastFundingApplied)||0}}
 function saveLocalSync(snap){try{const raw=JSON.stringify(snap);localStorage.setItem(STORAGE.trades,JSON.stringify(snap.trades));localStorage.setItem(STORAGE.cash,String(snap.cash));localStorage.setItem(STORAGE.reserved,String(snap.reservedMargin));localStorage.setItem(STORAGE.pos,JSON.stringify(snap.pos));localStorage.setItem(STORAGE.snapshot,raw);localStorage.setItem(STORAGE.initialized,"1")}catch(e){}}
 function save(){const snap=snapshot();state.lastSavedAt=snap.savedAt;saveLocalSync(snap);void idbPut(snap);void cachePut(snap)}
+function liveBootstrapComplete(){
+ const c=["1m","5m","15m","30m","1H"].every(k=>state.liveSeen.candles[k]);
+ return state.liveSeen.ticker&&state.liveSeen.mark&&state.liveSeen.oi&&state.liveSeen.funding&&state.liveSeen.book&&state.liveSeen.trades&&c;
+}
 function dataReadyForTrading(){
  const now=Date.now();
  const stale=(k,ms)=>!state.fresh[k]||now-state.fresh[k]>ms;
  const candleFresh=["1m","5m","15m","30m","1H"].every(k=>{const t=state.fresh.candles[k]||0;return t&&now-t<90000});
+ if(!liveBootstrapComplete()){state.haltReason="正在同步OKX实时数据，暂不允许新开仓";return false}
  if(stale("ticker",5000)||stale("mark",5000)||stale("oi",8000)||stale("funding",90000)||stale("book",3000)||stale("trades",5000)||!candleFresh){state.haltReason="核心行情数据未及时更新，暂停新开仓";return false}
  state.haltReason="";return true;
+}
+function signalEventReady(ag){
+ if(!state.bootBaselineReady||ag.signal==="观望"||Math.abs(ag.score)<2.8)return false;
+ const baselineWasNeutral=state.bootSignal==="观望"||Math.abs(state.bootScore)<2.8;
+ const directionChanged=ag.signal!==state.bootSignal;
+ const scoreChanged=Math.abs(ag.score-state.bootScore)>=0.75;
+ const last1m=state.candles["1m"]?.at(-1)?.[0]||0;
+ const newCandle=last1m>Number(state.bootCandleTs||0);
+ // Only a newly-qualified direction is allowed to unlock entry. A brief
+ // neutral flicker must not unlock the gate and then reopen the old signal.
+ return (baselineWasNeutral&&ag.signal!=="观望") || (directionChanged&&Math.abs(ag.score)>=2.8) || (scoreChanged&&newCandle);
 }
 function adaptiveEntryAllowed(ag){
  if(!dataReadyForTrading())return false;
@@ -124,6 +143,11 @@ function renderAccountStats(){
 function renderAuto(){const b=$("auto");if(!b)return;if(state.auto){b.textContent=state.haltReason?"自动运行 · 暂停新开仓":"自动运行中";b.className=state.haltReason?"on off":"on"}else{b.textContent="恢复自动交易";b.className="on off"}}
 function storageStatus(){const el=$("storageStatus");if(el){const t=state.lastSavedAt?new Date(state.lastSavedAt).toLocaleTimeString():"--";el.textContent=`本机记录已保存：${t}；交易 ${state.trades.length} 笔`;}const c=$("tradeCount");if(c)c.textContent=`（共 ${state.trades.length} 笔，全部显示）`; }
 function applySnapshot(snap){if(!snap||!Array.isArray(snap.trades)||!Number.isFinite(Number(snap.cash))||!Number.isFinite(Number(snap.reservedMargin)))return false;state.trades=snap.trades;state.cash=Number(snap.cash);state.reservedMargin=Number(snap.reservedMargin);state.pos=snap.pos||null;state.lastSavedAt=Number(snap.savedAt)||0;state.pool=Math.max(0,state.cash);return true}
+function initRunCycle(){
+  try{RUN_SEQ=(Number(localStorage.getItem(STORAGE.runSeq))||0)+1;localStorage.setItem(STORAGE.runSeq,String(RUN_SEQ))}catch(e){RUN_SEQ=1}
+  state.runId=`R${String(RUN_SEQ).padStart(4,"0")}-${new Date(RUN_STARTED_AT).toLocaleTimeString()}-${RUN_TOKEN}`;
+  state.runStartedAt=RUN_STARTED_AT;
+}
 async function load(){
   // V19 uses a completely separate persistence namespace. Legacy V14/V16/V17
   // account data is intentionally not imported because it can contain the wrong seed.
@@ -136,7 +160,7 @@ async function load(){
   }else{
     state.trades=[];state.cash=1000;state.startingCash=1000;state.reservedMargin=0;state.pool=1000;state.pos=null;state.lastTrade=0;state.lastFundingApplied=0;save();
   }
-  state.startingCash=1000;state.auto=true;renderTrades();renderAuto();renderAccountStats();storageStatus();await requestPersistentStorage();
+  state.startingCash=1000;state.auto=true;state.reentryGuard=true;state.reentryUnlockAt=0;state.bootSignal="观望";state.bootScore=0;state.bootCandleTs=0;state.bootBaselineReady=false;state.liveSeen={ticker:false,mark:false,oi:false,funding:false,book:false,trades:false,candles:{}};initRunCycle();renderTrades();renderAuto();renderAccountStats();storageStatus();await requestPersistentStorage();
 }
 setInterval(()=>{if(state.ready){save();storageStatus()}},5000);
 function pushTrade(trade){
@@ -149,7 +173,7 @@ function renderTrades(){
  <td>${x.leverage||"--"}x</td><td>${x.mode||"全仓"}</td><td>$${fmt(x.margin,2)}</td>
  <td>${fmt(x.contracts,0)}张</td><td>$${fmt(x.notional,2)}</td><td>${x.holdingSeconds==null?"--":x.holdingSeconds+"s"}</td>
  <td>${x.pnl==null?"--":"$"+fmt(x.pnl,2)}</td><td>${x.returnPct==null?"--":pct(x.returnPct,2)}</td>
- <td>${x.balanceAfter==null?"--":"$"+fmt(x.balanceAfter,2)}</td><td>${x.reason||""}</td></tr>`).join("");
+ <td>${x.balanceAfter==null?"--":"$"+fmt(x.balanceAfter,2)}</td><td>${x.triggerSource||"历史订单"}</td><td title="${x.runId||""}">${x.runId||"--"}</td><td>${x.reason||""}</td></tr>`).join("");
  $("trades").innerHTML=rows;
 }
 function updateOpenTrade(reason=""){if(!state.pos)return;let t=state.trades.find(x=>x.id===state.pos.tradeId);if(!t)return;t.exit=null;t.pnl=null;t.fee=state.pos.entryFee;t.balanceAfter=equity();t.reason=reason||t.reason;renderTrades();save();storageStatus()}
@@ -194,7 +218,7 @@ function openPos(side){
    margin,contracts,quantityBTC:contracts*state.ctVal*state.ctMult,notional,entryNotional:notional,
    exitNotional:null,pnl:null,grossPnl:null,fee,openFee:fee,closeFee:0,fundingFee:0,
    balanceBefore:before,equityBefore:before,balanceAfter:null,equityAfter:null,returnPct:null,
-   holdingSeconds:null,maxFavorable:0,maxAdverse:0,
+   holdingSeconds:null,maxFavorable:0,maxAdverse:0,triggerSource:"自动交易·实时信号",runId:state.runId,runStartedAt:state.runStartedAt,
    reason:`${state.lastReason}；${plan.level}（综合分 ${state.lastScore.toFixed(2)}）；全仓 ${leverage}x；OKX盘口吃单模拟成交；名义价值 $${fmt(notional,2)}；开仓手续费 $${fmt(fee,2)}`,
    entrySnapshot:{score:state.lastScore,signal:state.lastSignal,reason:state.lastReason,
      timeframes:Object.fromEntries(Object.keys(TF).map(k=>{const r=scoreFrame(state.candles[k]||[]);return [k,{signal:r.signal,score:r.score}]})),
@@ -246,7 +270,43 @@ async function closePos(reason){
 async function managePosition(){if(!state.pos||!state.price)return;await applyFundingIfDue();let p=state.pos,mark=state.markPx||state.price,dir=p.side==="多"?1:-1,move=(mark-p.entry)/p.entry*dir,ag=aggregate(),z=indicators(state.candles["15m"]||[]);let adverse=(p.side==="多"&&ag.signal==="偏空")||(p.side==="空"&&ag.signal==="偏多");let momentumFade=(p.side==="多"&&z.dif<z.dea&&z.r<48)||(p.side==="空"&&z.dif>z.dea&&z.r>52);let atrStop=z.atr&&Math.abs(mark-p.entry)>z.atr*2.2&&move<0;let peak=p.peakMove??move;p.peakMove=Math.max(peak,move);
  p.maxFavorable=Math.max(p.maxFavorable||0,move);
  p.maxAdverse=Math.min(p.maxAdverse||0,move);let trail=p.peakMove>0.012&&move<=p.peakMove-0.003;let hardRisk=p.margin>0&&move<-(Math.max(0.008,(z.atr/(mark||1)||0)*2.0));let liq=liquidationPrice();let liqHit=liq>0&&((p.side==="多"&&mark<=liq)||(p.side==="空"&&mark>=liq));updateOpenTrade(`持仓中；浮盈亏 $${fmt(unrealized(),2)}；峰值收益 ${(p.peakMove*100).toFixed(2)}%；预计强平价 $${fmt(liq,1)}`);if(liqHit)closePos("模拟强制平仓");else if(adverse&&Math.abs(ag.score)>3)closePos("综合方向反转");else if(momentumFade&&Math.abs(ag.score)>2)closePos("动能衰减");else if(atrStop||hardRisk)closePos("波动扩张且方向不利");else if(trail)closePos("盈利回撤保护")}
-async function autoTrade(){if(!state.auto||!state.price||!state.ready)return;try{let ag=aggregate();state.lastSignal=ag.signal;if(!state.pos&&Date.now()-state.lastTrade>60000&&adaptiveEntryAllowed(ag)){openPos(ag.signal==="偏多"?"多":"空")}await managePosition();renderAuto()}catch(e){state.haltReason="交易引擎异常，已暂停新开仓："+(e?.message||"未知错误");renderAuto();save()}}
+async function autoTrade(){
+ if(!state.auto||!state.price||!state.ready)return;
+ try{
+   let ag=aggregate();
+   state.lastSignal=ag.signal;state.lastScore=ag.score;state.lastReason=ag.reason;
+   // Refresh/re-entry protection: after a page reload, restore state and perform
+   // one complete market analysis first. This analysis can manage an existing
+   // position, but it is never allowed to open a new position.
+   const blockNewEntry=state.reentryGuard;
+   if(blockNewEntry){
+     // Refresh protection is event-based, not time-based: once all live OKX
+     // streams arrive after reload, capture the current signal as the baseline.
+     // A qualifying signal that already existed before refresh cannot open a new order.
+     if(liveBootstrapComplete()&&!state.bootBaselineReady){
+       state.bootSignal=ag.signal;
+       state.bootScore=ag.score;
+       state.bootCandleTs=state.candles["1m"]?.at(-1)?.[0]||Date.now();
+       state.bootBaselineReady=true;
+       state.haltReason="刷新保护：已建立实时信号基线，等待新的信号变化";
+       save();
+     }
+     if(state.bootBaselineReady&&signalEventReady(ag)){
+       state.reentryGuard=false;
+       state.haltReason="";
+       save();
+     }else{
+       state.haltReason=state.bootBaselineReady?"刷新保护：等待新的实时信号确认":"正在同步OKX实时数据，暂不允许新开仓";
+     }
+   }
+   if(!state.reentryGuard&&!state.pos&&Date.now()-state.lastTrade>60000&&adaptiveEntryAllowed(ag)){
+     openPos(ag.signal==="偏多"?"多":"空");
+   }
+   await managePosition();
+   if(!blockNewEntry&&!state.reentryGuard)state.haltReason="";
+   renderAuto();
+ }catch(e){state.haltReason="交易引擎异常，已暂停新开仓："+(e?.message||"未知错误");renderAuto();save()}
+}
 async function getJSON(path){let r=await fetch(REST+path,{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);let j=await r.json();if(j.code!=="0")throw new Error(j.msg||"OKX error");return j.data}
 async function loadHistory(){for(const [k,bar] of Object.entries(TF)){try{let d=await getJSON(`/api/v5/market/candles?instId=${INST}&bar=${bar}&limit=300`);let rows=d.map(x=>[+x[0],+x[1],+x[2],+x[3],+x[4],+x[5]]).reverse();state.candles[k]=rows}catch(e){state.candles[k]=[]}}
  try{let d=await getJSON(`/api/v5/market/ticker?instId=${INST}`);if(d[0]){state.price=+d[0].last;state.bidPx=+d[0].bidPx||state.price;state.askPx=+d[0].askPx||state.price;state.open24h=+d[0].open24h||state.price;state.vol=+d[0].volCcy24h||0;state.fresh.ticker=Date.now()}}catch(e){}
@@ -254,7 +314,7 @@ async function loadHistory(){for(const [k,bar] of Object.entries(TF)){try{let d=
  try{let d=await getJSON(`/api/v5/public/open-interest?instType=SWAP&instId=${INST}`);if(d[0]){state.oi=+d[0].oiCcy||0;state.oiHistory.push({t:Date.now(),v:state.oi});state.fresh.oi=Date.now()}}catch(e){}
  try{let d=await getJSON(`/api/v5/public/funding-rate?instId=${INST}`);if(d[0]){state.funding=+d[0].fundingRate||0;state.nextFundingTime=+d[0].nextFundingTime||0;state.fresh.funding=Date.now()}}catch(e){}
  try{let d=await getJSON(`/api/v5/public/instruments?instType=SWAP&instId=${INST}`);if(d[0]){if(+d[0].ctVal>0)state.ctVal=+d[0].ctVal;if(+d[0].ctMult>0)state.ctMult=+d[0].ctMult;if(+d[0].lotSz>0)state.lotSz=+d[0].lotSz;if(+d[0].tickSz>0)state.tickSz=+d[0].tickSz}}catch(e){}
- for(const k of Object.keys(TF))if(state.candles[k]?.length)state.fresh.candles[k]=Date.now();state.ready=true;updateUI()}
+ state.ready=true;updateUI()}
 function sub(ws,args){ws.send(JSON.stringify({op:"subscribe",args}))}
 function applyBookUpdate(d){
  const side=(arr,key)=>{const m=new Map(state.book[key].map(x=>[x[0],x[1]]));for(const row of (arr||[])){const px=row[0],sz=row[1];if(+sz===0)m.delete(px);else m.set(px,sz)}state.book[key]=Array.from(m.entries()).sort((a,b)=>key==="bids"?(+b[0]-+a[0]):(+a[0]-+b[0]));};
@@ -262,13 +322,13 @@ function applyBookUpdate(d){
  side(d.bids,"bids");side(d.asks,"asks");
 }
 function connect(){const ws=new WebSocket(WS);state.ws=ws;ws.onopen=()=>{$("status").textContent="OKX 实时数据";sub(ws,[{channel:"tickers",instId:INST},{channel:"mark-price",instType:"SWAP",instId:INST},{channel:"open-interest",instType:"SWAP",instId:INST},{channel:"funding-rate",instId:INST},{channel:"trades",instId:INST},{channel:"books",instId:INST},...Object.values(TF).map(bar=>({channel:`candle${bar}`,instId:INST}))])};ws.onmessage=e=>{let m=JSON.parse(e.data);if(!m.data)return;let d=m.data[0],ch=m.arg?.channel;
- if(ch==="tickers"){state.price=+d.last;state.bidPx=+d.bidPx||state.price;state.askPx=+d.askPx||state.price;state.open24h=+d.open24h||state.open24h;state.vol=+d.volCcy24h||state.vol;state.fresh.ticker=Date.now();state.priceHistory.push({t:Date.now(),v:state.price});state.priceHistory=state.priceHistory.filter(x=>Date.now()-x.t<360000)}
- if(ch==="mark-price"){state.markPx=+d.markPx||state.price;state.fresh.mark=Date.now()}
- if(ch==="open-interest"){state.oi=+d.oiCcy||0;state.fresh.oi=Date.now();state.oiHistory.push({t:Date.now(),v:state.oi});state.oiHistory=state.oiHistory.filter(x=>Date.now()-x.t<360000)}
- if(ch==="funding-rate"){state.funding=+d.fundingRate||0;state.fresh.funding=Date.now();state.nextFundingTime=+d.nextFundingTime||state.nextFundingTime}
- if(ch==="books"){applyBookUpdate(d);state.fresh.book=Date.now()}
- if(ch==="trades"){let px=+d.px,sz=+d.sz,side=d.side;state.fresh.trades=Date.now();state.flowHistory.push({t:Date.now(),b:side==="buy"?sz:0,s:side==="sell"?sz:0,px});state.flowHistory=state.flowHistory.filter(x=>Date.now()-x.t<300000)}
- if(ch?.startsWith("candle")){let key=ch.replace("candle","");state.fresh.candles[key]=Date.now();state.candles[key]??=[];let x=d,xr=[+x[0],+x[1],+x[2],+x[3],+x[4],+x[5]];let a=state.candles[key];if(a.length&&a.at(-1)[0]===xr[0])a[a.length-1]=xr;else a.push(xr);if(a.length>300)a.shift()}
+ if(ch==="tickers"){state.price=+d.last;state.bidPx=+d.bidPx||state.price;state.askPx=+d.askPx||state.price;state.open24h=+d.open24h||state.open24h;state.vol=+d.volCcy24h||state.vol;state.fresh.ticker=Date.now();state.liveSeen.ticker=true;state.priceHistory.push({t:Date.now(),v:state.price});state.priceHistory=state.priceHistory.filter(x=>Date.now()-x.t<360000)}
+ if(ch==="mark-price"){state.markPx=+d.markPx||state.price;state.fresh.mark=Date.now();state.liveSeen.mark=true}
+ if(ch==="open-interest"){state.oi=+d.oiCcy||0;state.fresh.oi=Date.now();state.liveSeen.oi=true;state.oiHistory.push({t:Date.now(),v:state.oi});state.oiHistory=state.oiHistory.filter(x=>Date.now()-x.t<360000)}
+ if(ch==="funding-rate"){state.funding=+d.fundingRate||0;state.fresh.funding=Date.now();state.liveSeen.funding=true;state.nextFundingTime=+d.nextFundingTime||state.nextFundingTime}
+ if(ch==="books"){applyBookUpdate(d);state.fresh.book=Date.now();state.liveSeen.book=true}
+ if(ch==="trades"){let px=+d.px,sz=+d.sz,side=d.side;state.fresh.trades=Date.now();state.liveSeen.trades=true;state.flowHistory.push({t:Date.now(),b:side==="buy"?sz:0,s:side==="sell"?sz:0,px});state.flowHistory=state.flowHistory.filter(x=>Date.now()-x.t<300000)}
+ if(ch?.startsWith("candle")){let key=ch.replace("candle","");state.fresh.candles[key]=Date.now();state.liveSeen.candles[key]=true;state.candles[key]??=[];let x=d,xr=[+x[0],+x[1],+x[2],+x[3],+x[4],+x[5]];let a=state.candles[key];if(a.length&&a.at(-1)[0]===xr[0])a[a.length-1]=xr;else a.push(xr);if(a.length>300)a.shift()}
  updateUI();autoTrade()};ws.onclose=()=>{$("status").textContent="断线，重连中…";setTimeout(connect,2000)};ws.onerror=()=>ws.close()}
 window.addEventListener("pagehide",()=>save());window.addEventListener("beforeunload",()=>save());document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="hidden")save()});
 $("auto").onclick=()=>{state.auto=!state.auto;renderAuto();if(!state.auto){/* 暂停仅阻止新开仓，不强制平仓 */}};
