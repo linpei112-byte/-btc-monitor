@@ -77,7 +77,7 @@ function updateUI(){
  for(const [k,id] of [["1m","s1"],["5m","s5"],["15m","s15"],["30m","s30"],["1H","s60"]])setSignal($(id),scoreFrame(state.candles[k]||[]).signal);
  let arr=state.candles["15m"]||[],z=indicators(arr),ag=aggregate();$("ema20").textContent=fmt(z.e20,1);$("ema60").textContent=fmt(z.e60,1);$("rsi").textContent=fmt(z.r,1);$("macd").textContent=fmt(z.hist,1);$("bb").textContent=z.mid?`${fmt(z.lo,1)} / ${fmt(z.mid,1)} / ${fmt(z.up,1)}`:"--";
  let fr=flowRatio();$("flow").textContent=fr==null?"等待":(fr*100).toFixed(0)+"%买 / "+((1-fr)*100).toFixed(0)+"%卖";
- state.lastSignal=ag.signal;state.lastScore=ag.score;state.lastReason=ag.reason;$("direction").textContent=ag.signal;$("reason").textContent=ag.reason;
+ state.lastSignal=ag.signal;state.lastScore=ag.score;state.lastReason=ag.reason;$("direction").textContent=ag.signal;renderEntryCheck(ag);$("reason").textContent=ag.reason;
  state.pool=state.cash;$("cash").textContent="$"+fmt(state.cash,2);$("pool").textContent="$"+fmt(state.pool,2);$("balance").textContent="$"+fmt(equity(),2);renderAccountStats();
  if(state.pos){let p=state.pos,upnl=unrealized();$("upnl").textContent="$"+fmt(upnl,2);$("pos").textContent=`${p.side} / ${p.leverage}x / ${p.mode} / 保证金 $${fmt(p.margin,2)} / ${fmt(p.contracts,0)}张 / 开仓 $${fmt(p.entry,1)} / 标记 $${fmt(state.markPx||state.price,1)}`}else{$("upnl").textContent="--";$("pos").textContent="无"}
  updateLiquidationUI()
@@ -121,6 +121,41 @@ function adaptiveEntryAllowed(ag){
  if(ag.flow!=null && ((side==="偏多"&&ag.flow<0.52)||(side==="偏空"&&ag.flow>0.48))){state.haltReason="主动成交未支持当前方向，暂停新开仓";return false}
  if(Math.abs(ag.oi1)>0.02){state.haltReason="OI短时异常波动，等待确认";return false}
  return true;
+}
+function entryCheck(ag){
+ const rows=[];
+ const add=(label,value,cls="muted")=>rows.push({label,value,cls});
+ if(state.pos){add("当前持仓","已有持仓，不重复开仓","warn");return {ready:false,rows,headline:"当前有持仓，暂不新开仓"}}
+ if(!state.auto){add("自动交易","已关闭","bad");return {ready:false,rows,headline:"自动交易未运行"}}
+ if(state.reentryGuard){add("刷新保护","等待刷新后的新信号确认","warn");}
+ const dataReady=dataReadyForTrading();
+ if(dataReady)add("实时数据","OKX核心行情均已更新","ok");else add("实时数据",state.haltReason||"核心数据未满足开仓要求","bad");
+ const side=ag.signal==="偏多"?"偏多":ag.signal==="偏空"?"偏空":null;
+ add("综合评分",`${ag.score.toFixed(2)} / 方向 ${ag.signal}`,Math.abs(ag.score)>=2.8&&side?"ok":"warn");
+ if(side){
+   const aligned=["1m","5m","15m"].map(k=>scoreFrame(state.candles[k]||[]).signal);
+   const n=aligned.filter(x=>x===side).length;
+   add("短周期确认",`${n}/3 个周期与${side}一致`,n>=2?"ok":"bad");
+   const fr=flowRatio();
+   if(fr==null)add("主动成交","暂无足够实时数据","warn");
+   else{
+     const supported=side==="偏多"?fr>=0.52:fr<=0.48;
+     add("主动成交",`${(fr*100).toFixed(1)}% 买 / ${((1-fr)*100).toFixed(1)}% 卖`,supported?"ok":"bad");
+   }
+   const oi1=rateOI(60000);
+   add("OI 1分钟变化",Number.isFinite(oi1)?pct(oi1,3):"等待数据",Number.isFinite(oi1)&&Math.abs(oi1)<=0.02?"ok":"bad");
+ }else add("方向确认","观望，评分不足以触发方向交易","bad");
+ const since=Date.now()-Number(state.lastTrade||0);
+ if(state.lastTrade&&since<60000)add("开仓间隔",`${Math.ceil((60000-since)/1000)} 秒后重新检查`,"warn");else add("开仓间隔","已满足","ok");
+ const ready=!state.pos&&state.auto&&!state.reentryGuard&&dataReady&&Math.abs(ag.score)>=2.8&&side&&
+   ["1m","5m","15m"].map(k=>scoreFrame(state.candles[k]||[]).signal).filter(x=>x===side).length>=2&&
+   (()=>{const fr=flowRatio();return fr==null||(side==="偏多"?fr>=0.52:fr<=0.48)})()&&Math.abs(rateOI(60000))<=0.02&&(!state.lastTrade||since>=60000);
+ return {ready,rows,headline:ready?"满足当前开仓条件":"继续观望，至少有一个开仓条件未满足"};
+}
+function renderEntryCheck(ag){
+ const el=$("entryReasons"),st=$("entryStatus");if(!el||!st)return;
+ const c=entryCheck(ag);st.textContent=c.headline;st.className="entry-status "+(c.ready?"ready":"wait");
+ el.innerHTML=c.rows.map(r=>`<div class="entry-reason"><span class="label">${r.label}</span><span class="value ${r.cls}">${r.value}</span></div>`).join("");
 }
 function renderAccountStats(){
  const closed=state.trades.filter(x=>Number.isFinite(Number(x.pnl)));
