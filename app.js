@@ -1,5 +1,7 @@
-const WS="wss://ws.okx.com:8443/ws/v5/public";
-const REST="https://www.okx.com";
+const BUILD_VERSION="21.4";
+const WS_PUBLIC="wss://ws.okx.com:8443/ws/v5/public";
+const WS_BUSINESS="wss://ws.okx.com:8443/ws/v5/business";
+const REST=(window.OKX_API_BASE||"https://openapi.okx.com").replace(/\/$/,"");
 const INST="BTC-USDT-SWAP";
 const TF={"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1H":"1H"};
 const STORAGE={trades:"btc32_v19_trades",cash:"btc32_v19_cash",reserved:"btc32_v19_reserved",pos:"btc32_v19_pos",initialized:"btc32_v19_initialized",snapshot:"btc32_v19_snapshot",runSeq:"btc32_v19_run_seq"};
@@ -85,19 +87,19 @@ function updateUI(){
 function unrealized(){if(!state.pos)return 0;let p=state.pos,mark=state.markPx||state.price,dir=p.side==="多"?1:-1;return (mark-p.entry)*dir*p.contracts*state.ctVal*state.ctMult}
 function equity(){return state.cash+state.reservedMargin+unrealized()}
 function availableCash(){return state.cash}
-function snapshot(){return {version:19,savedAt:Date.now(),trades:state.trades.slice(),cash:state.cash,reservedMargin:state.reservedMargin,pos:state.pos,lastTrade:Number(state.lastTrade)||0,lastFundingApplied:Number(state.lastFundingApplied)||0}}
+function snapshot(){return {version:21,savedAt:Date.now(),trades:state.trades.slice(),cash:state.cash,reservedMargin:state.reservedMargin,pos:state.pos,lastTrade:Number(state.lastTrade)||0,lastFundingApplied:Number(state.lastFundingApplied)||0}}
 function saveLocalSync(snap){try{const raw=JSON.stringify(snap);localStorage.setItem(STORAGE.trades,JSON.stringify(snap.trades));localStorage.setItem(STORAGE.cash,String(snap.cash));localStorage.setItem(STORAGE.reserved,String(snap.reservedMargin));localStorage.setItem(STORAGE.pos,JSON.stringify(snap.pos));localStorage.setItem(STORAGE.snapshot,raw);localStorage.setItem(STORAGE.initialized,"1")}catch(e){}}
 function save(){const snap=snapshot();state.lastSavedAt=snap.savedAt;saveLocalSync(snap);void idbPut(snap);void cachePut(snap)}
 function liveBootstrapComplete(){
  const c=["1m","5m","15m","30m","1H"].every(k=>state.liveSeen.candles[k]);
- return state.liveSeen.ticker&&state.liveSeen.mark&&state.liveSeen.oi&&state.liveSeen.funding&&state.liveSeen.book&&state.liveSeen.trades&&c;
+ return state.liveSeen.ticker&&state.liveSeen.mark&&state.liveSeen.oi&&state.liveSeen.book&&state.liveSeen.funding&&state.liveSeen.trades&&c;
 }
 function dataReadyForTrading(){
  const now=Date.now();
  const stale=(k,ms)=>!state.fresh[k]||now-state.fresh[k]>ms;
  const candleFresh=["1m","5m","15m","30m","1H"].every(k=>{const t=state.fresh.candles[k]||0;return t&&now-t<90000});
- if(!liveBootstrapComplete()){state.haltReason="正在同步OKX实时数据，暂不允许新开仓";return false}
- if(stale("ticker",5000)||stale("mark",5000)||stale("oi",8000)||stale("funding",90000)||stale("book",3000)||stale("trades",5000)||!candleFresh){state.haltReason="核心行情数据未及时更新，暂停新开仓";return false}
+ if(!liveBootstrapComplete()){state.haltReason="正在等待OKX各必需实时数据流首次到达，暂不允许新开仓";return false}
+ if(stale("ticker",10000)||stale("mark",10000)||stale("oi",15000)||stale("book",10000)||stale("trades",15000)||!candleFresh){state.haltReason="核心行情/主动成交数据未及时更新，暂停新开仓";return false}
  state.haltReason="";return true;
 }
 function signalEventReady(ag){
@@ -118,7 +120,8 @@ function adaptiveEntryAllowed(ag){
  const side=ag.signal==="偏多"?"偏多":"偏空";
  const alignedCount=aligned.filter(x=>x===side).length;
  if(alignedCount<2){state.haltReason="短周期未形成同向确认，暂停新开仓";return false}
- if(ag.flow!=null && ((side==="偏多"&&ag.flow<0.52)||(side==="偏空"&&ag.flow>0.48))){state.haltReason="主动成交未支持当前方向，暂停新开仓";return false}
+ if(ag.flow==null){state.haltReason="主动成交暂无足够实时OKX数据，暂停新开仓";return false}
+ if((side==="偏多"&&ag.flow<0.52)||(side==="偏空"&&ag.flow>0.48)){state.haltReason="主动成交未支持当前方向，暂停新开仓";return false}
  if(Math.abs(ag.oi1)>0.02){state.haltReason="OI短时异常波动，等待确认";return false}
  return true;
 }
@@ -129,7 +132,7 @@ function entryCheck(ag){
  if(!state.auto){add("自动交易","已关闭","bad");return {ready:false,rows,headline:"自动交易未运行"}}
  if(state.reentryGuard){add("刷新保护","等待刷新后的新信号确认","warn");}
  const dataReady=dataReadyForTrading();
- if(dataReady)add("实时数据","OKX核心行情均已更新","ok");else add("实时数据",state.haltReason||"核心数据未满足开仓要求","bad");
+ if(dataReady)add("实时数据","OKX核心行情、主动成交与K线均在实时更新","ok");else add("实时数据",state.haltReason||"核心数据未满足开仓要求","bad");
  const side=ag.signal==="偏多"?"偏多":ag.signal==="偏空"?"偏空":null;
  add("综合评分",`${ag.score.toFixed(2)} / 方向 ${ag.signal}`,Math.abs(ag.score)>=2.8&&side?"ok":"warn");
  if(side){
@@ -149,7 +152,7 @@ function entryCheck(ag){
  if(state.lastTrade&&since<60000)add("开仓间隔",`${Math.ceil((60000-since)/1000)} 秒后重新检查`,"warn");else add("开仓间隔","已满足","ok");
  const ready=!state.pos&&state.auto&&!state.reentryGuard&&dataReady&&Math.abs(ag.score)>=2.8&&side&&
    ["1m","5m","15m"].map(k=>scoreFrame(state.candles[k]||[]).signal).filter(x=>x===side).length>=2&&
-   (()=>{const fr=flowRatio();return fr==null||(side==="偏多"?fr>=0.52:fr<=0.48)})()&&Math.abs(rateOI(60000))<=0.02&&(!state.lastTrade||since>=60000);
+   (()=>{const fr=flowRatio();return fr!=null&&(side==="偏多"?fr>=0.52:fr<=0.48)})()&&Math.abs(rateOI(60000))<=0.02&&(!state.lastTrade||since>=60000);
  return {ready,rows,headline:ready?"满足当前开仓条件":"继续观望，至少有一个开仓条件未满足"};
 }
 function renderEntryCheck(ag){
@@ -331,7 +334,7 @@ async function autoTrade(){
        state.haltReason="";
        save();
      }else{
-       state.haltReason=state.bootBaselineReady?"刷新保护：等待新的实时信号确认":"正在同步OKX实时数据，暂不允许新开仓";
+       state.haltReason=state.bootBaselineReady?"刷新保护：等待新的实时信号确认":"等待OKX必需实时数据流";
      }
    }
    if(!state.reentryGuard&&!state.pos&&Date.now()-state.lastTrade>60000&&adaptiveEntryAllowed(ag)){
@@ -356,15 +359,57 @@ function applyBookUpdate(d){
  if(d.action==="snapshot"||!state.book.bids.length&&!state.book.asks.length){state.book={bids:d.bids||[],asks:d.asks||[]};return}
  side(d.bids,"bids");side(d.asks,"asks");
 }
-function connect(){const ws=new WebSocket(WS);state.ws=ws;ws.onopen=()=>{$("status").textContent="OKX 实时数据";sub(ws,[{channel:"tickers",instId:INST},{channel:"mark-price",instType:"SWAP",instId:INST},{channel:"open-interest",instType:"SWAP",instId:INST},{channel:"funding-rate",instId:INST},{channel:"trades",instId:INST},{channel:"books",instId:INST},...Object.values(TF).map(bar=>({channel:`candle${bar}`,instId:INST}))])};ws.onmessage=e=>{let m=JSON.parse(e.data);if(!m.data)return;let d=m.data[0],ch=m.arg?.channel;
- if(ch==="tickers"){state.price=+d.last;state.bidPx=+d.bidPx||state.price;state.askPx=+d.askPx||state.price;state.open24h=+d.open24h||state.open24h;state.vol=+d.volCcy24h||state.vol;state.fresh.ticker=Date.now();state.liveSeen.ticker=true;state.priceHistory.push({t:Date.now(),v:state.price});state.priceHistory=state.priceHistory.filter(x=>Date.now()-x.t<360000)}
- if(ch==="mark-price"){state.markPx=+d.markPx||state.price;state.fresh.mark=Date.now();state.liveSeen.mark=true}
- if(ch==="open-interest"){state.oi=+d.oiCcy||0;state.fresh.oi=Date.now();state.liveSeen.oi=true;state.oiHistory.push({t:Date.now(),v:state.oi});state.oiHistory=state.oiHistory.filter(x=>Date.now()-x.t<360000)}
- if(ch==="funding-rate"){state.funding=+d.fundingRate||0;state.fresh.funding=Date.now();state.liveSeen.funding=true;state.nextFundingTime=+d.nextFundingTime||state.nextFundingTime}
- if(ch==="books"){applyBookUpdate(d);state.fresh.book=Date.now();state.liveSeen.book=true}
- if(ch==="trades"){let px=+d.px,sz=+d.sz,side=d.side;state.fresh.trades=Date.now();state.liveSeen.trades=true;state.flowHistory.push({t:Date.now(),b:side==="buy"?sz:0,s:side==="sell"?sz:0,px});state.flowHistory=state.flowHistory.filter(x=>Date.now()-x.t<300000)}
- if(ch?.startsWith("candle")){let key=ch.replace("candle","");state.fresh.candles[key]=Date.now();state.liveSeen.candles[key]=true;state.candles[key]??=[];let x=d,xr=[+x[0],+x[1],+x[2],+x[3],+x[4],+x[5]];let a=state.candles[key];if(a.length&&a.at(-1)[0]===xr[0])a[a.length-1]=xr;else a.push(xr);if(a.length>300)a.shift()}
- updateUI();autoTrade()};ws.onclose=()=>{$("status").textContent="断线，重连中…";setTimeout(connect,2000)};ws.onerror=()=>ws.close()}
+let publicWS=null,businessWS=null,publicTimer=null,businessTimer=null,publicReconnect=null,businessReconnect=null;
+const wsHealth={public:{lastMessage:0,lastPong:0,pendingPingAt:0},business:{lastMessage:0,lastPong:0,pendingPingAt:0}};
+function liveHealth(){
+ const now=Date.now();
+ const pub=publicWS?.readyState===1, biz=businessWS?.readyState===1;
+ const pubFresh=pub&&now-wsHealth.public.lastMessage<35000, bizFresh=biz&&now-wsHealth.business.lastMessage<35000;
+ return {pub,biz,pubFresh,bizFresh,ok:pubFresh&&bizFresh};
+}
+function setLiveStatus(text){const el=$("status");if(el)el.textContent=text}
+function refreshLiveStatus(){
+ const h=liveHealth();
+ if(!h.pub||!h.biz){setLiveStatus(!h.pub&&!h.biz?"OKX 实时数据 · 连接中…":!h.pub?"OKX 实时数据 · 公共行情重连中…":"OKX 实时数据 · K线重连中…");return}
+ if(!h.pubFresh||!h.bizFresh){setLiveStatus("OKX 实时数据 · 等待最新推送…");return}
+ if(liveBootstrapComplete())setLiveStatus("OKX 实时数据 · 已连接并持续更新");
+ else setLiveStatus("OKX 实时数据 · 已连接，等待必需数据流…");
+}
+function heartbeat(ws,kind){
+ if(!ws||ws.readyState!==1)return;
+ const h=wsHealth[kind];
+ const now=Date.now();
+ if(h.pendingPingAt && now-h.pendingPingAt>12000){try{ws.close()}catch(e){}return}
+ try{ws.send("ping");h.pendingPingAt=now}catch(e){try{ws.close()}catch(_){} }
+}
+function scheduleReconnect(kind){const key=kind==="public"?"publicReconnect":"businessReconnect";if(window[key])return;window[key]=setTimeout(()=>{window[key]=null;kind==="public"?connectPublic():connectBusiness()},2000)}
+function connectPublic(){
+ const ws=new WebSocket(WS_PUBLIC);publicWS=ws;state.ws=ws;
+ ws.onopen=()=>{wsHealth.public.lastMessage=Date.now();wsHealth.public.lastPong=Date.now();wsHealth.public.pendingPingAt=0;refreshLiveStatus();sub(ws,[{channel:"tickers",instId:INST},{channel:"mark-price",instType:"SWAP",instId:INST},{channel:"open-interest",instType:"SWAP",instId:INST},{channel:"funding-rate",instId:INST},{channel:"trades",instId:INST},{channel:"books",instId:INST}]);clearInterval(publicTimer);publicTimer=setInterval(()=>heartbeat(ws,"public"),20000)};
+ ws.onmessage=e=>{wsHealth.public.lastMessage=Date.now();if(e.data==="pong"){wsHealth.public.lastPong=Date.now();wsHealth.public.pendingPingAt=0;refreshLiveStatus();return}let m;try{m=JSON.parse(e.data)}catch{return}if(m.event==="notice"&&m.code==="64008"){setLiveStatus("OKX 公共行情即将维护 · 主动重连");try{ws.close()}catch(_){}return}if(m.event==="error"){setLiveStatus("OKX 公共行情订阅异常 · 自动重连");try{ws.close()}catch(_){}return}if(!m.data)return;let d=m.data[0],ch=m.arg?.channel;
+  if(ch==="tickers"){state.price=+d.last;state.bidPx=+d.bidPx||state.price;state.askPx=+d.askPx||state.price;state.open24h=+d.open24h||state.open24h;state.vol=+d.volCcy24h||state.vol;state.fresh.ticker=Date.now();state.liveSeen.ticker=true;state.priceHistory.push({t:Date.now(),v:state.price});state.priceHistory=state.priceHistory.filter(x=>Date.now()-x.t<360000)}
+  if(ch==="mark-price"){state.markPx=+d.markPx||state.price;state.fresh.mark=Date.now();state.liveSeen.mark=true}
+  if(ch==="open-interest"){state.oi=+d.oiCcy||0;state.fresh.oi=Date.now();state.liveSeen.oi=true;state.oiHistory.push({t:Date.now(),v:state.oi});state.oiHistory=state.oiHistory.filter(x=>Date.now()-x.t<360000)}
+  if(ch==="funding-rate"){state.funding=+d.fundingRate||0;state.fresh.funding=Date.now();state.liveSeen.funding=true;state.nextFundingTime=+d.nextFundingTime||state.nextFundingTime}
+  if(ch==="books"){applyBookUpdate(d);state.fresh.book=Date.now();state.liveSeen.book=true}
+  if(ch==="trades"){let px=+d.px,sz=+d.sz,side=d.side;state.fresh.trades=Date.now();state.liveSeen.trades=true;state.flowHistory.push({t:Date.now(),b:side==="buy"?sz:0,s:side==="sell"?sz:0,px});state.flowHistory=state.flowHistory.filter(x=>Date.now()-x.t<300000)}
+  updateUI();autoTrade();
+ };
+ ws.onclose=()=>{clearInterval(publicTimer);wsHealth.public.pendingPingAt=0;if(publicWS===ws){publicWS=null;state.ws=null;refreshLiveStatus();scheduleReconnect("public")}};
+ ws.onerror=()=>{try{ws.close()}catch(e){}};
+}
+function connectBusiness(){
+ const ws=new WebSocket(WS_BUSINESS);businessWS=ws;
+ ws.onopen=()=>{wsHealth.business.lastMessage=Date.now();wsHealth.business.lastPong=Date.now();wsHealth.business.pendingPingAt=0;refreshLiveStatus();sub(ws,Object.values(TF).map(bar=>({channel:`candle${bar}`,instId:INST})));clearInterval(businessTimer);businessTimer=setInterval(()=>heartbeat(ws,"business"),20000)};
+ ws.onmessage=e=>{wsHealth.business.lastMessage=Date.now();if(e.data==="pong"){wsHealth.business.lastPong=Date.now();wsHealth.business.pendingPingAt=0;refreshLiveStatus();return}let m;try{m=JSON.parse(e.data)}catch{return}if(m.event==="notice"&&m.code==="64008"){setLiveStatus("OKX K线服务即将维护 · 主动重连");try{ws.close()}catch(_){}return}if(m.event==="error"){setLiveStatus("OKX K线订阅异常 · 自动重连");try{ws.close()}catch(_){}return}if(!m.data)return;let d=m.data[0],ch=m.arg?.channel;
+  if(ch?.startsWith("candle")){let key=ch.replace("candle","");state.fresh.candles[key]=Date.now();state.liveSeen.candles[key]=true;state.candles[key]??=[];let x=d,xr=[+x[0],+x[1],+x[2],+x[3],+x[4],+x[5]];let a=state.candles[key];if(a.length&&a.at(-1)[0]===xr[0])a[a.length-1]=xr;else a.push(xr);if(a.length>300)a.shift()}
+  refreshLiveStatus();updateUI();autoTrade();
+ };
+ ws.onclose=()=>{clearInterval(businessTimer);wsHealth.business.pendingPingAt=0;if(businessWS===ws){businessWS=null;refreshLiveStatus();scheduleReconnect("business")}};
+ ws.onerror=()=>{try{ws.close()}catch(e){}};
+}
+function connect(){connectPublic();connectBusiness()}
+
 window.addEventListener("pagehide",()=>save());window.addEventListener("beforeunload",()=>save());document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="hidden")save()});
 $("auto").onclick=()=>{state.auto=!state.auto;renderAuto();if(!state.auto){/* 暂停仅阻止新开仓，不强制平仓 */}};
 load().then(()=>loadHistory()).then(connect).catch(()=>{state.ready=true;connect()});setInterval(()=>{updateUI();autoTrade()},1000);
